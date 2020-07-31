@@ -1,0 +1,404 @@
+
+#dev-us-east-1-nlp-transcribelevel0-1
+Parameters:
+  Environment:
+    Type: String
+    Description: "Environment"
+    Default: 'dev'
+  AccountPrefix:
+    Type: String
+    Description: "Account Prefix"
+    Default: nlp
+  CodeFile:
+    Type: String
+    Description: "Name of Lambda File Zip"
+    Default: '-nlp_09_25_19_12_36_am.zip'
+  RawAudioBucketName:
+    Type: String
+    Description: "Name of Raw audio files. Note only .wav files allowed at this time."
+    Default: "input-bucket"
+  TranscribedJsonBucketName:
+    Type: String
+    Description: "Location of transcribed json files."
+    Default: "output-bucket"
+  CodeBucketName:
+    Type: String
+    Description: "Location of Raw Audio Files. Note only .wav files allowed at this time."
+    Default: "-nlp-code-bucket"
+  SparkFileName:
+    Type: String
+    Description: "Spark File Name."
+    Default: "_transcribe_sentences.py"
+  ParquetBucketName:
+    Type: String
+    Description: "parquet file name."
+    Default: "parquet-bucket"
+  EMRSubnetID:
+    Type: String
+    Description: "Subnet to which the EMR for NLP belongs"
+Conditions:
+  HasSubNet:
+    Fn::Not:
+      - Fn::Equals:
+        - ''
+        - Ref: EMRSubnetID
+#    Default: "subnet-0844a281ae5587f39"
+Resources:
+  ParquetS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref ParquetBucketName]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+
+  OutputS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref TranscribedJsonBucketName]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+  InputS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref RawAudioBucketName]]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      NotificationConfiguration:
+        LambdaConfigurations:
+            - Event: 's3:ObjectCreated:*'
+              Function: !GetAtt TranscribeFunction.Arn
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: 'suffix'
+                      Value: 'wav'
+  InputBucketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref TranscribeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !GetAtt InputS3Bucket.Arn
+  TranscribeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Transcribes speech
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: !Ref CodeFile
+      Handler: _Nlp_Transcribe.transcribe_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Environment:
+        Variables:
+          InputS3Bucket: !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref RawAudioBucketName]]
+          OutputS3Bucket: !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref TranscribedJsonBucketName]]
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: [lambda.amazonaws.com]}
+          Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName: S3Policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 's3:PutObject'
+                - 's3:GetObject'
+              Resource: !Join [ "", [ !GetAtt OutputS3Bucket.Arn,"/*"] ]
+            - Effect: Allow
+              Action:
+                - 'transcribe:StartTranscriptionJob'
+              #Resource: !Join [ "", ["arn:aws:s3:::", !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref RawAudioBucketName]],"/*"]]
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 's3:GetObject'
+              Resource: !Join [ "", ["arn:aws:s3:::", !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref RawAudioBucketName]],"/*"]]
+              #Resource: "*"
+            - Effect: Allow
+              Action:
+                - 'kms:Decrypt'
+              Resource: !Join [ "",["arn:aws:kms:",!Ref "AWS::Region",":",!Ref "AWS::AccountId",":alias/aws/s3"]]
+  CustomEMRRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '_NLP_CustomEMRRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: ["elasticmapreduce.amazonaws.com","datapipeline.amazonaws.com"]}
+          Action: ['sts:AssumeRole']
+      Policies:
+      - PolicyName: EMRPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:*
+                - datapipeline:DescribeObjects
+                - datapipeline:EvaluateExpression
+                - dynamodb:BatchGetItem
+                - dynamodb:DescribeTable
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:UpdateTable
+                - ec2:AuthorizeSecurityGroupIngress
+                - ec2:CancelSpotInstanceRequests
+                - ec2:CreateSecurityGroup
+                - ec2:CreateTags
+                - ec2:DeleteTags
+                - ec2:Describe*
+                - ec2:ModifyImageAttribute
+                - ec2:ModifyInstanceAttribute
+                - ec2:RequestSpotInstances
+                - ec2:RunInstances
+                - ec2:StartInstances
+                - ec2:StopInstances
+                - ec2:TerminateInstances
+                - ec2:AuthorizeSecurityGroupEgress
+                - ec2:DeleteSecurityGroup
+                - ec2:RevokeSecurityGroupEgress
+                - ec2:DescribeNetworkInterfaces
+                - ec2:CreateNetworkInterface
+                - ec2:DeleteNetworkInterface
+                - ec2:DetachNetworkInterface
+                - elasticmapreduce:*
+                - iam:GetInstanceProfile
+                - iam:GetRole
+                - iam:GetRolePolicy
+                - iam:ListAttachedRolePolicies
+                - iam:ListRolePolicies
+                - iam:ListInstanceProfiles
+                - iam:PassRole
+                - rds:DescribeDBInstances
+                - rds:DescribeDBSecurityGroups
+                - redshift:DescribeClusters
+                - redshift:DescribeClusterSecurityGroups
+                - s3:CreateBucket
+                - s3:DeleteObject
+                - s3:Get*
+                - s3:List*
+                - s3:Put*
+                - sdb:BatchPutAttributes
+                - sdb:Select*
+                - sns:GetTopicAttributes
+                - sns:ListTopics
+                - sns:Publish
+                - sns:Subscribe
+                - sns:Unsubscribe
+                - sqs:CreateQueue
+                - sqs:Delete*
+                - sqs:GetQueue*
+                - sqs:PurgeQueue
+                - sqs:ReceiveMessage
+
+              Resource: "*"
+                # - !Join [ '', [ !GetAtt OutputS3Bucket.Arn,'/*'] ]
+                # - !Join [ '', [ !GetAtt ParquetS3Bucket.Arn,'/*'] ]
+                # - !Join [ '', ['arn:aws:s3:::datapipeline',!Ref "AWS::Region",'/',!Ref "AWS::Region",'/*']]
+                # - 'arn:aws:s3:::us-east-1.elasticmapreduce/*'
+                # - 'arn:aws:s3:::-nlp-code-bucket/*'
+
+
+            - Effect: Allow
+              Action:
+                - 'iam:CreateServiceLinkedRole'
+              Resource: "*"
+                # - !Join [ '', [ !GetAtt OutputS3Bucket.Arn,'/*'] ]
+                # - !Join [ '', [ !GetAtt ParquetS3Bucket.Arn,'/*'] ]
+                # - !Join [ '', ['arn:aws:s3:::datapipeline',!Ref "AWS::Region",'/',!Ref "AWS::Region",'/*']]
+                # - 'arn:aws:s3:::*.elasticmapreduce/*'
+                # - 'arn:aws:s3:::-nlp-code-bucket/*'
+
+              Condition:
+                  StringLike:
+                      am:AWSServiceName:
+                        - 'elasticmapreduce.amazonaws.com'
+                        - 'spot.amazonaws.com'
+
+  CustomEC2ResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '_NLP_CustomEC2ResourceRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: {Service: ["ec2.amazonaws.com"]}
+          Action: ['sts:AssumeRole']
+      Policies:
+      - PolicyName: CustomEC2Policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:*
+                - datapipeline:*
+                - dynamodb:*
+                - ec2:Describe*
+                - elasticmapreduce:AddJobFlowSteps
+                - elasticmapreduce:Describe*
+                - elasticmapreduce:ListInstance*
+                - rds:Describe*
+                - redshift:DescribeClusters
+                - redshift:DescribeClusterSecurityGroups
+                - s3:*
+                - sdb:*
+                - sns:*
+                - sqs:*
+              Resource:
+                - !Join [ '', [ !GetAtt OutputS3Bucket.Arn,'/*'] ]
+                - !Join [ '', [ !GetAtt ParquetS3Bucket.Arn,'/*'] ]
+                - !Join [ '', ['arn:aws:s3:::datapipeline-',!Ref "AWS::Region",'/',!Ref "AWS::Region",'/*']]
+                - 'arn:aws:s3:::us-east-1.elasticmapreduce/*'
+                - 'arn:aws:s3:::-nlp-code-bucket/*'
+                - 'arn:aws:elasticmapreduce:*'
+
+
+  InstanceProf:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref CustomEC2ResourceRole
+      Path: "/"
+      Roles:
+        - !Ref CustomEC2ResourceRole
+
+  #DataPipeLine
+  NLPDataPipeline:
+    Type: AWS::DataPipeline::Pipeline
+    Properties:
+      Name: NLPDataPipeline
+      Description: "Pipeline to transform transcribed data to Level 1 files"
+      Activate: true
+      PipelineObjects:
+      -
+        Id: "DefaultSchedule"
+        Name: "RunOnce"
+        Fields:
+          -
+            Key: "occurrences"
+            StringValue: "1"
+          -
+            Key: "startAt"
+            StringValue: "FIRST_ACTIVATION_DATE_TIME"
+          -
+            Key: "type"
+            StringValue: "Schedule"
+          -
+            Key: "period"
+            StringValue: "1 Day"
+      -
+        Id: "Default"
+        Name: "Default"
+        Fields:
+          - Key: pipelineLogUri
+            StringValue: !Join
+                            - ""
+                            - - 's3://'
+                              - !Ref CodeBucketName
+                              - "/logs"
+          -
+            Key: "type"
+            StringValue: "Default"
+          -
+            Key: "scheduleType"
+            StringValue: "cron"
+          -
+            Key: "failureAndRerunMode"
+            StringValue: "CASCADE"
+          -
+            Key: "role"
+            StringValue: "_NLP_CustomEMRRole"
+          -
+            Key: "resourceRole"
+            StringValue: "_NLP_CustomEC2ResourceRole"
+          -
+            Key: "schedule"
+            RefValue: "DefaultSchedule"
+      -
+        Id: "EmrClusterForNLP"
+        Name: "EmrClusterForNLP"
+        Fields:
+          -
+            Key: "terminateAfter"
+            StringValue: "2 Hours"
+          -
+            Key: "masterInstanceType"
+            StringValue: "m1.medium"
+          -
+            Key: "coreInstanceType"
+            StringValue: "m1.medium"
+          -
+            Key: "coreInstanceCount"
+            StringValue: "2"
+          -
+            Key: "type"
+            StringValue: "EmrCluster"
+          -
+            Key: "applications"
+            StringValue : 'spark'
+          -
+            Key: "releaseLabel"
+            StringValue : 'emr-5.17.0'
+
+          - Fn::If:
+            - HasSubNet
+            -
+              Key: "subnetId"
+              StringValue: !Ref EMRSubnetID
+            - !Ref "AWS::NoValue"
+
+      -
+        Id: "EmrNLPActivity"
+        Name: "EmrNLPActivity"
+        Fields:
+          -
+            Key: "type"
+            StringValue: "EmrActivity"
+          -
+            Key: "runsOn"
+            RefValue: EmrClusterForNLP
+          -
+            Key: "step"
+            StringValue: !Join
+                            - ''
+                            - -  'command-runner.jar'
+                              - ','
+                              - 'spark-submit'
+                              - ','
+                              - '--deploy-mode'
+                              - ','
+                              - 'cluster'
+                              - ','
+                              - 's3://'
+                              - !Ref CodeBucketName
+                              - '/'
+                              - !Ref SparkFileName
+                              - ','
+                              - 's3a://'
+                              - !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref TranscribedJsonBucketName]]
+                              - '/'
+                              - ','
+                              - 's3a://'
+                              - !Join [ "-", [ !Ref Environment,!Ref AccountPrefix,!Ref "AWS::Region",!Ref ParquetBucketName]]
