@@ -1,3 +1,3 @@
 # nlp
 NLP DataPipeline using AWS
-<img src="https://github.com/ArtfulCreator/nlp/edit/master/NLPArchitecture.png">
+<img src="https://raw.githubusercontent.com/ArtfulCreator/nlp/master/NLPArchitecture.png">
